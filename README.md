@@ -17,9 +17,11 @@ Existing POV plugins have two problems. Some place the camera at the wrong spot,
 
 ## Installation
 
-1. You need BepInEx 5 (already included in BetterRepack).
+1. You need BepInEx 5 (already included in HF Patch).
 2. Download `KK_PerspectiveX.dll` from [Releases](../../releases) and drop it into `BepInEx/plugins/`.
-3. If you have RealPOV installed (BetterRepack includes it), disable it by renaming `RealPOV.Koikatu.dll` to `RealPOV.Koikatu.dll.disabled`, since both plugins use Backspace as the toggle key.
+3. If you have RealPOV installed (I think HF Patch includes it), disable it by renaming `RealPOV.Koikatu.dll` to `RealPOV.Koikatu.dll.disabled`, since both plugins use Backspace as the toggle key.
+
+Tested and played on Koikatsu + After School with BepInEx 5. If it doesn't work on your setup, please [open an issue](../../issues) and I'll take a look.
 
 ## Controls
 
