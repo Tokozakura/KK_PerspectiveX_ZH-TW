@@ -4,16 +4,29 @@ A first-person POV plugin for Koikatsu that doesn't clip through the body and do
 
 Works in the main game (free roam), H scenes, and CharaStudio.
 
+## Demo
+
+<!-- Screenshot/GIF: commit the file (e.g. under images/) and reference it below. -->
+<!-- ![PerspectiveX in action](images/demo.gif) -->
+
+<!-- Video: drag & drop the .mp4 into a GitHub issue/PR/discussion comment box to get an
+     upload URL (https://github.com/user-attachments/assets/...), then paste that URL
+     on its own line below - GitHub renders it as a native video player. -->
+
 ## Why another POV mod?
 
 Existing POV plugins have two problems. Some place the camera at the wrong spot, giving you a chest-level view with the head clipping into the screen. RealPOV places it correctly but copies the head bone's full animation rotation, including roll, so the view tilts sideways and jerks around with every animation. PerspectiveX handles position and rotation separately:
 
-| | PerspectiveX |
-|---|---|
-| **Viewpoint** | True eye level, at the midpoint of the actual eye bones |
-| **Rotation** | Fully mouse-controlled, with the horizon always level. An optional "animation sway" setting lets a configurable amount of head motion through, with roll always removed |
-| **Position** | Follows the head through an adjustable smoother, so animation jitter doesn't hit your eyes |
-| **Clipping** | The POV character's head, hair and head accessories are hidden while active, and restored when you leave POV |
+| | PerspectiveX | RealPOV | KK_StudioPOV (Studio-only) |
+|---|---|---|---|
+| **Viewpoint** | True eye level, at the midpoint of the actual eye bones | Same eye-bone midpoint | Same eye-bone midpoint |
+| **Rotation** | Fully mouse-controlled and independent of the character's bones, horizon always level. Optional "animation sway" lets a configurable amount of head motion through, with roll always removed | Overrides the neck bone, but the camera still inherits the head's full world rotation, so animated spine/chest lean still rolls the view | Copies the eye bone's raw rotation every frame, so any animation or pose edit rotates the camera directly, with no limit on pitch |
+| **Posing while in POV** | Moving bones (e.g. with KKPE) doesn't spin your view - rotation is entirely yours | Bone edits up the chain can still tilt the camera, since rotation isn't fully decoupled | Bone edits move the camera immediately, since it reads the bone's rotation live |
+| **Head hiding** | Uses the game's own auto-hide flag, the same one it uses when the camera gets close on its own - no side effects | Same flag (optional) | Deactivates the whole head object; since Unity stops animating deactivated bones, the eye position can freeze while the body keeps moving, letting the camera drift and clip into the body |
+| **Mouse look limits** | Clean yaw/pitch, no wraparound | Unclamped rotation accumulation | Unclamped rotation accumulation - enough drag can flip the view upside down |
+| **Comfort options** | Position smoothing, animation-sway blend, forward/up offsets, live FOV, all adjustable mid-POV | FOV, sensitivity, fixed offset | FOV, sensitivity |
+
+(Based on reading the public source of [RealPOV](https://github.com/Keelhauled/KeelPlugins) and [KK_StudioPOV](https://github.com/Mantas-2155X/StudioPOV) - describing what the code does, not a knock on either project.)
 
 ## Installation
 
