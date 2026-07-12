@@ -17,7 +17,7 @@ namespace PerspectiveX
     {
         public const string GUID = "bucky.kk.perspectivex";
         public const string PluginName = "PerspectiveX";
-        public const string Version = "1.3.0";
+        public const string Version = "1.3.1";
 
         private ConfigEntry<KeyboardShortcut> ToggleKey { get; set; }
         private ConfigEntry<KeyboardShortcut> CyclePrevKey { get; set; }
@@ -40,6 +40,7 @@ namespace PerspectiveX
         private ConfigEntry<float> NearClip { get; set; }
         private ConfigEntry<bool> HideHead { get; set; }
         private ConfigEntry<bool> AlignWithBody { get; set; }
+        private ConfigEntry<bool> EnableInFreeRoam { get; set; }
 
         private const int ViewSlotCount = 3;
         private ConfigEntry<KeyboardShortcut>[] saveSlotKeys;
@@ -68,6 +69,16 @@ namespace PerspectiveX
 
         private Camera cam;
         private MonoBehaviour disabledCameraControl;
+        // main-game free-roam is driven by the bundled StrayTech CameraSystem singleton
+        // (a manager object, not a component on the camera), suppressed via reflection so
+        // the single DLL keeps working on KKS even if that type isn't present there
+        private UnityEngine.Object roamCamSystem;
+        private PropertyInfo roamCamShouldUpdate;
+        private bool roamCamPrevShouldUpdate;
+        // free-roam's own Space-toggled first-person view (ActionGame.CameraStateDefinitionChange),
+        // which hides the whole body via chaCtrl.visibleAll; suppressed while our POV owns the camera
+        private MonoBehaviour freeRoamViewSwitcher;
+        private bool freeRoamViewSwitcherWasEnabled;
         private DepthOfField dof;
         private bool dofChanged;
         private float dofOrigSize;
@@ -157,6 +168,12 @@ namespace PerspectiveX
                 new ConfigDescription("Lower values let very close geometry render without being cut off.", new AcceptableValueRange<float>(0.01f, 0.1f)));
             HideHead = Config.Bind("General", "Hide character head", true,
                 "Hide the POV character's head (incl. hair and head accessories) so nothing clips into the view.");
+            EnableInFreeRoam = Config.Bind("General", "Use POV during free-roam", false,
+                "OFF by default. When you walk around the map the game already has its own first-person view (press Space) that this mod clashes with - " +
+                "with both on, the built-in view hides the body while this one hides the head, so the character can vanish and the camera gets jittery. " +
+                "While this is off, Backspace does nothing during free-roam (it still works in H-scenes and Studio). " +
+                "Turn it on to use PerspectiveX here anyway: it takes over and suppresses the built-in Space view, but it's less reliable than in H/Studio - " +
+                "if the character disappears or the view glitches, turn this back off and use the game's own Space camera instead.");
             AlignWithBody = Config.Bind("Comfort", "Align camera with body", false,
                 "Tilt the camera to follow the character's body orientation, so the view isn't kept artificially level when they're lying on their side or leaning. Fine-tune with the roll keys.");
 
@@ -166,6 +183,11 @@ namespace PerspectiveX
             {
                 if (povEnabled && chara)
                     RestoreHeadVisibility(chara, !HideHead.Value && origVisibleHeadAlways);
+            };
+            EnableInFreeRoam.SettingChanged += (s, e) =>
+            {
+                if (EnableInFreeRoam.Value)
+                    Logger.LogMessage("Heads up: free-roam POV fights the game's own Space view and can make your character invisible or the camera glitchy. If it misbehaves, turn it back off and use Space instead.");
             };
 
             SceneManager.sceneLoaded += (scene, mode) =>
@@ -203,6 +225,8 @@ namespace PerspectiveX
             {
                 if (povEnabled)
                     DisablePov();
+                else if (IsFreeRoam() && !EnableInFreeRoam.Value)
+                    Logger.LogMessage("PerspectiveX POV is off during free-roam - it clashes with the game's own first-person view (Space). Turn on \"Use POV during free-roam\" in the plugin settings to use it here.");
                 else
                     EnablePov();
                 return;
@@ -443,6 +467,7 @@ namespace PerspectiveX
                 disabledCameraControl = cam.GetComponent<global::Studio.CameraControl>();
             if (disabledCameraControl)
                 disabledCameraControl.enabled = false;
+            FreezeRoamCamera();
 
             dof = cam.GetComponent<DepthOfField>();
             if (dof && dof.enabled && dof.focalTransform)
@@ -462,6 +487,7 @@ namespace PerspectiveX
                 fov = DefaultFov.Value;
 
             CaptureAndHideHead();
+            SuppressFreeRoamViewSwitcher();
 
             InitViewFromHead();
             manualRoll = 0f;
@@ -486,6 +512,8 @@ namespace PerspectiveX
             if (disabledCameraControl)
                 disabledCameraControl.enabled = true;
             disabledCameraControl = null;
+            RestoreRoamCamera();
+            RestoreFreeRoamViewSwitcher();
 
             if (dofChanged && dof)
             {
@@ -503,6 +531,151 @@ namespace PerspectiveX
             dragging = false;
             fpsMode = false;
             camLocked = false;
+        }
+
+        // The main-game free-roam camera isn't a CameraControl_Ver2 (that's H) or Studio.CameraControl
+        // (that's studio) — it's driven by the game's bundled StrayTech CameraSystem, a singleton that
+        // lives on its own manager object and writes the MainCamera transform every Update/LateUpdate.
+        // Because it isn't a component on the camera, cam.GetComponent<...> never finds it, so it keeps
+        // running and fights our onPreCull override → the jittery, teleporting, uncontrollable free-roam
+        // camera. Its ShouldUpdate flag is the game's own pause switch: false makes DoCameraUpdate early-out
+        // (no transform writes) and also makes it ignore new camera-state registrations, so the freeze holds
+        // even across map-camera-change triggers while POV is active. Reached by reflection so a missing/renamed
+        // StrayTech type on Koikatsu Sunshine can't break POV entry; if absent we simply do nothing extra.
+        private void FreezeRoamCamera()
+        {
+            roamCamSystem = null;
+            roamCamShouldUpdate = null;
+            try
+            {
+                Type camSysType = Type.GetType("StrayTech.CameraSystem, Assembly-CSharp");
+                if (camSysType == null)
+                    return;
+                UnityEngine.Object instance = FindObjectOfType(camSysType);
+                if (!instance)
+                    return;
+                PropertyInfo shouldUpdate = camSysType.GetProperty("ShouldUpdate", BindingFlags.Public | BindingFlags.Instance);
+                if (shouldUpdate == null)
+                    return;
+                roamCamPrevShouldUpdate = (bool)shouldUpdate.GetValue(instance, null);
+                shouldUpdate.SetValue(instance, false, null);
+                roamCamSystem = instance;
+                roamCamShouldUpdate = shouldUpdate;
+            }
+            catch (Exception)
+            {
+                // StrayTech API drift on KKS must never break entering POV
+                roamCamSystem = null;
+                roamCamShouldUpdate = null;
+            }
+        }
+
+        private void RestoreRoamCamera()
+        {
+            if (roamCamShouldUpdate != null && roamCamSystem)
+            {
+                try
+                {
+                    roamCamShouldUpdate.SetValue(roamCamSystem, roamCamPrevShouldUpdate, null);
+                }
+                catch (Exception)
+                {
+                    // ditto: never let camera-system restore break POV exit
+                }
+            }
+            roamCamSystem = null;
+            roamCamShouldUpdate = null;
+        }
+
+        // True only in the main-game free-roam map. That mode has its own Space-toggled first-person
+        // view which hides the whole body; combined with our head-hiding the character vanishes and the
+        // two cameras fight, so POV there is opt-in (EnableInFreeRoam) and Backspace is otherwise ignored.
+        // Studio and H-scenes have no such switcher, so POV keeps working there unconditionally. hFlag
+        // (non-null in H) is an extra guard so an H-scene can never be misread as free-roam.
+        private bool IsFreeRoam()
+        {
+            return !isStudio && hFlag == null && FindFreeRoamViewSwitcher() != null;
+        }
+
+        private MonoBehaviour FindFreeRoamViewSwitcher()
+        {
+            try
+            {
+                // ActionGame.CameraStateDefinitionChange lives only in the free-roam ActionScene and
+                // drives its TPS/FPS view + body visibility. Reflection so a missing/renamed type on
+                // Koikatsu Sunshine can't break anything - there it just reads as "not free-roam".
+                Type t = Type.GetType("ActionGame.CameraStateDefinitionChange, Assembly-CSharp");
+                if (t == null)
+                    return null;
+                return FindObjectOfType(t) as MonoBehaviour;
+            }
+            catch (Exception)
+            {
+                return null;
+            }
+        }
+
+        // Stops the free-roam view switcher while our POV owns the camera: disabling the component halts
+        // both the Space TPS/FPS toggle and its per-frame distance-based body hiding (its Rx streams are
+        // gated on base.enabled), and we force the body visible so only the head stays hidden (by us).
+        private void SuppressFreeRoamViewSwitcher()
+        {
+            freeRoamViewSwitcher = null;
+            MonoBehaviour switcher = FindFreeRoamViewSwitcher();
+            if (!switcher)
+                return;
+            try
+            {
+                freeRoamViewSwitcherWasEnabled = switcher.enabled;
+                switcher.enabled = false;
+                freeRoamViewSwitcher = switcher;
+                SetVisibleAll(chara, true);
+            }
+            catch (Exception)
+            {
+                // free-roam handling must never break POV entry
+            }
+        }
+
+        private void RestoreFreeRoamViewSwitcher()
+        {
+            if (freeRoamViewSwitcher)
+            {
+                try
+                {
+                    // re-enabling it hands body/camera management back to the game, which re-derives
+                    // visibleAll on its own next frame - no need to restore that ourselves
+                    freeRoamViewSwitcher.enabled = freeRoamViewSwitcherWasEnabled;
+                }
+                catch (Exception)
+                {
+                }
+            }
+            freeRoamViewSwitcher = null;
+        }
+
+        private static void SetVisibleAll(ChaControl c, bool value)
+        {
+            if (!c)
+                return;
+            try
+            {
+                // visibleAll sits on a ChaControl base class; reflection keeps it safe if KKS differs
+                PropertyInfo p = c.GetType().GetProperty("visibleAll", BindingFlags.Public | BindingFlags.Instance);
+                if (p != null && p.CanWrite)
+                    p.SetValue(c, value, null);
+                else
+                {
+                    FieldInfo f = c.GetType().GetField("visibleAll", BindingFlags.Public | BindingFlags.Instance);
+                    if (f == null)
+                        return;
+                    f.SetValue(c, value);
+                }
+                c.LateUpdateForce(); // apply the visibility change this frame
+            }
+            catch (Exception)
+            {
+            }
         }
 
         private void CycleCharacter(int direction)
@@ -533,6 +706,10 @@ namespace PerspectiveX
 
             chara = next;
             CaptureAndHideHead();
+            // when we've taken over free-roam, keep the newly selected body visible too
+            // (the built-in view switcher that would normally manage this is suppressed)
+            if (freeRoamViewSwitcher)
+                SetVisibleAll(chara, true);
             InitViewFromHead();
             camLocked = false;
         }
