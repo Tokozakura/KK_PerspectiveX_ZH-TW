@@ -1,82 +1,83 @@
 # KK_PerspectiveX
 
-A first-person POV plugin for Koikatsu that doesn't clip through the body and doesn't make you dizzy.
+一款適用於 Koikatsu 的第一人稱視角（POV）插件，不會讓畫面穿入角色身體，也不容易造成暈眩。
 
-Works in the main game (free roam), H scenes, and CharaStudio.
+可用於主遊戲（自由移動）、H 場景及 CharaStudio。
 
-Supports both Koikatsu and Koikatsu Sunshine - the same DLL works for both games. I've tested it thoroughly on Sunshine and it behaves identically to the original Koikatsu in its current state, though as a newer/less common target for POV mods, expect the occasional Sunshine-specific bug. If the two games diverge more in the future I may need to split the plugin, but for now one DLL covers both just fine.
+同時支援 Koikatsu 與 Koikatsu Sunshine，兩款遊戲可使用相同的 DLL。我已在 Sunshine 中進行完整測試，目前的運作方式與原版 Koikatsu 相同。不過 Sunshine 是較新、較少見的 POV 插件使用環境，仍可能偶爾出現 Sunshine 特有的問題。若兩款遊戲日後的差異變得更大，可能需要將插件拆分成不同版本；目前則只需使用同一個 DLL。
 
-A Traditional Chinese (ZH-TW) translation fork is available, maintained by Tokozakura: [releases](https://github.com/Tokozakura/KK_PerspectiveX_ZH-TW/releases).
+原版英文由原作者維護：[版本下載](https://github.com/bani4kaskashka/KK_PerspectiveX)。
 
-## Why another POV mod?
+## 為什麼還需要另一款 POV 插件？
 
-Existing POV plugins have two problems. Some place the camera at the wrong spot, giving you a chest-level view with the head clipping into the screen. RealPOV places it correctly but copies the head bone's full animation rotation, including roll, so the view tilts sideways and jerks around with every animation. PerspectiveX handles position and rotation separately:
+現有的 POV 插件主要有兩個問題。部分插件會把攝影機放在錯誤的位置，導致視點落在胸口高度，頭部還可能穿入畫面。RealPOV 雖然能把攝影機放在正確位置，卻會完整複製頭部骨骼的動畫旋轉，包括側滾角度，因此畫面會隨動畫向左右傾斜並劇烈晃動。PerspectiveX 則將攝影機的位置與旋轉分開處理：
 
-| | PerspectiveX | RealPOV | KK_StudioPOV (Studio-only) |
+|  | PerspectiveX | RealPOV | KK_StudioPOV（僅限工作室） |
 |---|---|---|---|
-| **Viewpoint** | True eye level, at the midpoint of the actual eye bones | Same eye-bone midpoint | Same eye-bone midpoint |
-| **Rotation** | Fully mouse-controlled and independent of the character's bones, horizon always level. Optional "animation sway" lets a configurable amount of head motion through, with roll always removed | Overrides the neck bone, but the camera still inherits the head's full world rotation, so animated spine/chest lean still rolls the view | Copies the eye bone's raw rotation every frame, so any animation or pose edit rotates the camera directly, with no limit on pitch |
-| **Posing while in POV** | Moving bones (e.g. with KKPE) doesn't spin your view - rotation is entirely yours | Bone edits up the chain can still tilt the camera, since rotation isn't fully decoupled | Bone edits move the camera immediately, since it reads the bone's rotation live |
-| **Head hiding** | Uses the game's own auto-hide flag, the same one it uses when the camera gets close on its own - no side effects | Same flag (optional) | Deactivates the whole head object; since Unity stops animating deactivated bones, the eye position can freeze while the body keeps moving, letting the camera drift and clip into the body |
-| **Mouse look limits** | Clean yaw/pitch, no wraparound | Unclamped rotation accumulation | Unclamped rotation accumulation - enough drag can flip the view upside down |
-| **Comfort options** | Position smoothing, animation-sway blend, forward/up offsets, live FOV, one-click presets, saveable view slots, camera lock - all adjustable mid-POV | FOV, sensitivity, fixed offset | FOV, sensitivity |
+| **視點位置** | 真正的眼睛高度，位於實際雙眼骨骼的中間位置 | 同樣位於雙眼骨骼的中間位置 | 同樣位於雙眼骨骼的中間位置 |
+| **視角旋轉** | 完全由滑鼠控制，不受角色骨骼影響，地平線會保持水平。可選的「動畫晃動」設定能讓部分頭部動作影響視角，但永遠會移除側滾與傾斜 | 會覆寫頸部骨骼，但攝影機仍會繼承頭部完整的世界旋轉，因此脊椎或胸部的動畫傾斜仍會使畫面側滾 | 每幀直接複製眼睛骨骼的原始旋轉，因此任何動畫或姿勢編輯都會立即旋轉攝影機，且沒有俯仰角限制 |
+| **POV 中調整姿勢** | 移動骨骼（例如使用 KKPE）不會使視角跟著旋轉，旋轉方向完全由玩家控制 | 因為旋轉沒有完全分離，調整上層骨骼仍可能使攝影機傾斜 | 會即時讀取眼睛骨骼的旋轉，因此移動骨骼會立刻改變攝影機方向 |
+| **隱藏頭部** | 使用遊戲內建的自動隱藏旗標，與遊戲攝影機靠近角色時使用的方式相同，不會產生額外副作用 | 使用相同旗標（可選） | 直接停用整個頭部物件；由於 Unity 不會繼續播放已停用骨骼的動畫，眼睛位置可能固定不動，而身體仍持續移動，導致攝影機偏移或穿入身體 |
+| **滑鼠視角限制** | 乾淨的水平與垂直旋轉，角度不會循環翻轉 | 旋轉角度會無限制累積 | 旋轉角度會無限制累積，拖曳過多甚至可能使畫面上下顛倒 |
+| **舒適度功能** | 位置平滑、動畫晃動混合、前方與垂直偏移、即時 FOV、一鍵預設、可儲存的視角欄位及攝影機鎖定；所有項目都能在 POV 使用期間調整 | FOV、靈敏度、固定偏移 | FOV、靈敏度 |
 
-(Based on reading the public source of [RealPOV](https://github.com/Keelhauled/KeelPlugins) and [KK_StudioPOV](https://github.com/Mantas-2155X/StudioPOV) - describing what the code does, not a knock on either project.)
+（以上內容是根據 [RealPOV](https://github.com/Keelhauled/KeelPlugins) 與 [KK_StudioPOV](https://github.com/Mantas-2155X/StudioPOV) 的公開原始碼所整理，只是在說明各插件的實際運作方式，並非批評任何作品。）
 
-## Installation
+## 安裝方式
 
-1. You need BepInEx 5 (already included in HF Patch).
-2. Download `KK_PerspectiveX.dll` from [Releases](../../releases) and drop it into `BepInEx/plugins/`.
-3. If you have RealPOV installed (I think HF Patch includes it), disable it by renaming `RealPOV.Koikatu.dll` to `RealPOV.Koikatu.dll.disabled`, since both plugins use Backspace as the toggle key.
+1. 需要安裝 BepInEx 5（HF Patch 已包含）。
+2. 從 [Releases](../../releases) 下載 `KK_PerspectiveX.dll`，並將檔案放入 `BepInEx/plugins/`。
+3. 如果已安裝 RealPOV（HF Patch 可能已包含），請將 `RealPOV.Koikatu.dll` 改名為 `RealPOV.Koikatu.dll.disabled` 以停用，因為兩款插件預設都使用 Backspace 作為切換快捷鍵。
 
-Tested and played on KK and KKS with BepInEx 5+. If it doesn't work on your setup, please [open an issue](../../issues) and I'll take a look.
+已在安裝 BepInEx 5 以上版本的 KK 與 KKS 中測試並實際遊玩。如果插件無法在你的環境中運作，請[建立問題回報](../../issues)，我會協助確認。
 
-## Controls
+## 操作方式
 
-All rebindable via ConfigurationManager (F1).
+所有按鍵都可以透過 ConfigurationManager（F1）重新設定。
 
-- **Backspace**: toggle POV. In Studio, select a character in the workspace first.
-- **Left mouse (hold + drag)**: look around. The cursor stays visible and usable otherwise.
-- **Ctrl+L**: hands-free FPS mouse look. The cursor is captured until you press it again.
-- **Ctrl+Shift+Left / Ctrl+Shift+Right**: switch the POV to the previous/next character.
-- **Scroll wheel**: adjust FOV while in POV (can be turned off in the settings if you keep hitting it by accident).
-- **Comma / Period**: tilt the camera left/right. **Slash** resets the tilt to level.
-- **Semicolon**: lock the camera in place. The view stops following the head, which is handy during caress animations that toss it around; looking around still works. Press again to unlock and the camera glides back.
-- **Ctrl+Shift+1/2/3**: save the current view (FOV, look direction, tilt, camera offsets) into a slot. **Ctrl+1/2/3**: recall it. Slots are remembered between game sessions.
-- **Ctrl+P**: open the presets panel. In Studio you can also click the PerspectiveX eye button in the bottom-left toolbar.
+- **Backspace**：切換 POV。在工作室中，請先從工作區選擇一名角色。
+- **按住滑鼠左鍵並拖曳**：環顧四周。未拖曳時，游標會保持顯示並可正常操作。
+- **Ctrl+L**：切換免按住滑鼠的 FPS 視角。游標會被鎖定，再按一次即可取回游標。
+- **Ctrl+Shift+左方向鍵／Ctrl+Shift+右方向鍵**：將 POV 切換至上一名或下一名角色。
+- **滑鼠滾輪**：在 POV 中調整 FOV。如果經常誤觸，可在設定中關閉此功能。
+- **逗號／句號**：讓攝影機向左或向右傾斜。按下 **斜線** 可恢復水平。
+- **分號**：將攝影機鎖定在目前位置。攝影機將停止跟隨頭部移動，適合用於頭部晃動較大的愛撫動畫；鎖定後仍可環顧四周。再按一次即可解除鎖定，攝影機會平滑回到角色位置。
+- **Ctrl+Shift+1／2／3**：將目前視角（FOV、觀看方向、傾斜、攝影機偏移）儲存至指定欄位。按 **Ctrl+1／2／3** 可載入。重新開啟遊戲後，儲存內容仍會保留。
+- **Ctrl+P**：開啟預設面板。在工作室中，也可以點擊左下工具列的 PerspectiveX 眼睛按鈕。
 
-### Presets panel
+### 預設面板
 
-The in-game panel collects everything preset-related in one place, no config diving needed:
+遊戲內面板會將所有預設相關功能集中在同一處，不需要進入設定檔調整：
 
-- **View presets**: one-click setups (Cozy 60 / Natural 90 / Action 110) that set FOV, position smoothing and camera offset together.
-- **Custom presets**: dial in your favorite FOV/smoothing/offset combo, type a name, and save it as your own one-click preset (up to 5).
-- **Saved views**: the same three save/recall slots as the hotkeys, as buttons, with each slot's FOV shown.
+- **視角預設**：一鍵套用舒適 60／自然 90／動感 110，同時設定 FOV、位置平滑與攝影機偏移。
+- **自訂預設**：調整喜歡的 FOV、平滑與偏移組合，輸入名稱後儲存為自己的單鍵預設，最多可儲存 5 組。
+- **已儲存視角**：提供與快捷鍵相同的三個儲存／載入欄位，並以按鈕操作；每個欄位也會顯示儲存的 FOV。
 
-Comfort settings (position smoothing, animation sway, FOV, offsets) are in the plugin settings, adjustable live while in POV. The view presets are available there too. An optional "Align camera with body" setting tilts the view to match the character's body orientation, for example when they're lying on their side, instead of keeping the horizon level.
+舒適度設定（位置平滑、動畫晃動、FOV、偏移）位於插件設定中，使用 POV 時也可以即時調整。視角預設同樣可從設定中使用。可選的「攝影機對齊身體」設定會使視角配合角色身體方向傾斜，例如角色側躺時，畫面會跟隨身體方向，而不是強制保持水平。
 
-## Building from source
+## 從原始碼建置
 
-The plugin targets .NET Framework 3.5 and builds with the regular .NET SDK on any OS.
-Copy these reference DLLs from your game install into `lib/` first (they are copyrighted, so not included here):
+本插件以 .NET Framework 3.5 為目標框架，可在任何作業系統中使用一般 .NET SDK 建置。
 
-- `BepInEx/core/`: `BepInEx.dll`, `0Harmony.dll`
-- `Koikatu_Data/Managed/`: `Assembly-CSharp.dll`, `Assembly-CSharp-firstpass.dll`, `UnityEngine.dll`, `UnityEngine.UI.dll`
+請先將以下參考 DLL 從遊戲安裝目錄複製到 `lib/`。這些檔案受著作權保護，因此不包含在原始碼中：
 
-Then:
+- `BepInEx/core/`：`BepInEx.dll`、`0Harmony.dll`
+- `Koikatu_Data/Managed/`：`Assembly-CSharp.dll`、`Assembly-CSharp-firstpass.dll`、`UnityEngine.dll`、`UnityEngine.UI.dll`
+
+接著執行：
 
 ```sh
 cd src/KK_PerspectiveX
 dotnet build -c Release
 ```
 
-Output: `src/KK_PerspectiveX/bin/Release/KK_PerspectiveX.dll`
+輸出位置：`src/KK_PerspectiveX/bin/Release/KK_PerspectiveX.dll`
 
-## My links
+## 我的連結
 
-- [Patreon](https://www.patreon.com/c/zamalkogts)
-- [DeviantArt](https://www.deviantart.com/zamalkogts)
+- [linktr.ee](https://linktr.ee/tokozakura)
+- [Patreon](https://www.deviantart.com/zamalkogts)
 
-## License
+## 授權條款
 
-[MIT](LICENSE)
+[MIT](LICENSE)  感謝bani4kaskashka作者同意翻譯中文
