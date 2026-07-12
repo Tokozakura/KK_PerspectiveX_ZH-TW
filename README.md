@@ -7,6 +7,7 @@
 同時支援 Koikatsu 與 Koikatsu Sunshine，兩款遊戲可使用相同的 DLL。我已在 Sunshine 中進行完整測試，目前的運作方式與原版 Koikatsu 相同。不過 Sunshine 是較新、較少見的 POV 插件使用環境，仍可能偶爾出現 Sunshine 特有的問題。若兩款遊戲日後的差異變得更大，可能需要將插件拆分成不同版本；目前則只需使用同一個 DLL。
 
 原版英文由原作者維護：[版本下載](https://github.com/bani4kaskashka/KK_PerspectiveX)。
+The original English version is maintained by the original author
 
 ## 為什麼還需要另一款 POV 插件？
 
