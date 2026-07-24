@@ -9,6 +9,7 @@ using UnityEngine;
 using UnityEngine.EventSystems;
 using UnityEngine.SceneManagement;
 using UnityStandardAssets.ImageEffects;
+using ShadowCastingMode = UnityEngine.Rendering.ShadowCastingMode;
 
 namespace PerspectiveX
 {
@@ -18,7 +19,7 @@ namespace PerspectiveX
     {
         public const string GUID = "bucky.kk.perspectivex";
         public const string PluginName = "PerspectiveX";
-        public const string Version = "1.3.2";
+        public const string Version = "1.3.3";
 
         private ConfigEntry<KeyboardShortcut> ToggleKey { get; set; }
         private ConfigEntry<KeyboardShortcut> CyclePrevKey { get; set; }
@@ -50,11 +51,24 @@ namespace PerspectiveX
 
         private const int CustomPresetCount = 5;
         private const int PanelWindowId = 0x0BCC1;
+        private const string PresetNameControl = "PerspectiveXPresetName";
+        // head renderers are re-scanned on this interval so accessories/outfits swapped
+        // while POV is active still get hidden
+        private const float HeadRescanInterval = 0.5f;
+        private const float HiddenHeadScanInterval = 1f;
+        // how long the panel may swallow input with a completely frozen cursor before
+        // the dead man's switch gives the input back (~3 seconds at 60 fps)
+        private const int InputSuppressFrameLimit = 180;
         private ConfigEntry<string>[] customPresets;
         private bool panelVisible;
         private Rect panelRect;
         private bool panelRectInit;
         private string newPresetName = "";
+        private bool presetNameFocused;
+        private int inputSuppressFrames;
+        private Vector3 lastSuppressMousePos;
+        private int hiddenHeadChars;
+        private float nextHiddenHeadScan;
         private GUIStyle panelHeaderStyle;
         private GUIStyle panelHintStyle;
         private bool panelStylesInit;
@@ -70,6 +84,10 @@ namespace PerspectiveX
 
         private Camera cam;
         private MonoBehaviour disabledCameraControl;
+        // the game camera's own "don't take input right now" hooks, borrowed while the panel is up
+        private MonoBehaviour hookedCameraControl;
+        private CameraCondHook noCtrlHook;
+        private CameraCondHook zoomHook;
         // main-game free-roam is driven by the bundled StrayTech CameraSystem singleton
         // (a manager object, not a component on the camera), suppressed via reflection so
         // the single DLL keeps working on KKS even if that type isn't present there
@@ -87,9 +105,11 @@ namespace PerspectiveX
         private Vector3 dofOrigFocalPos;
         private float origFov;
         private float origNearClip;
-        private bool origVisibleHeadAlways;
-        private bool origHeadActive;
-        private bool[] origHairActive;
+        // renderers we switched to shadows-only to hide the head, with their previous mode
+        private readonly Dictionary<Renderer, ShadowCastingMode> hiddenRenderers = new Dictionary<Renderer, ShadowCastingMode>();
+        private readonly List<Renderer> deadRenderers = new List<Renderer>();
+        private float nextHeadRescan;
+        private bool hiddenHeadNoticeShown;
 
         private float yaw;
         private float pitch;
@@ -100,6 +120,8 @@ namespace PerspectiveX
         private bool bodyRollInit;
         private bool dragging;
         private bool fpsMode;
+        // single source of truth for "we asked the game to pin the cursor" — see SetCursorLock
+        private bool cursorLocked;
         private Vector3 smoothPos;
         private bool smoothPosInit;
         private Quaternion swayBaseline;
@@ -183,7 +205,7 @@ namespace PerspectiveX
             HideHead.SettingChanged += (s, e) =>
             {
                 if (povEnabled && chara)
-                    RestoreHeadVisibility(chara, !HideHead.Value && origVisibleHeadAlways);
+                    ApplyHeadHiding();
             };
             EnableInFreeRoam.SettingChanged += (s, e) =>
             {
@@ -206,21 +228,43 @@ namespace PerspectiveX
             Camera.onPreCull -= OnCameraPreCull;
             if (povEnabled)
                 DisablePov();
+            SetCursorLock(false);
+            UnhookCameraConditions();
         }
 
         private void Update()
         {
-            // while an IMGUI text field has focus (our preset name box, ConfigurationManager's
-            // search box, ...) typed characters must not trigger hotkeys
-            bool typingInUi = GUIUtility.keyboardControl != 0;
+            UpdateHotkeys();
+            // deliberately last: it blackholes input for the rest of the frame, so every
+            // hotkey of ours (POV toggle, panel toggle, FPS-look toggle — the ways out of a
+            // stuck state) must already have been read by the time it runs
+            UpdatePanelInputSuppression();
+        }
+
+        private void UpdateHotkeys()
+        {
+            // while OUR preset-name box has focus, typed characters must not trigger hotkeys.
+            // Only ours: GUIUtility.keyboardControl is process-global, so keying off that let
+            // any other plugin's focused text field (ConfigurationManager's search box, ...)
+            // silently kill every PerspectiveX shortcut, POV toggle included.
+            bool typingInUi = presetNameFocused;
 
             if (!typingInUi && PanelKey.Value.IsDown())
                 SetPanelVisible(!panelVisible);
 
-            // keep clicks/scroll on the panel from reaching the game, same trick
-            // ConfigurationManager uses (cursor is free whenever the panel is usable)
-            if (panelVisible && !fpsMode && !dragging && IsMouseOverPanel())
-                Input.ResetInputAxes();
+            if (panelVisible)
+            {
+                EnsureCameraConditionHooks();
+                UpdateHiddenHeadScan();
+            }
+
+            // Safety net, above the !povEnabled early-out on purpose: a locked cursor is the
+            // game warping the physical OS cursor back to one pixel every frame, desktop-wide,
+            // and in Studio the only code that ever releases it is Studio.CameraControl's
+            // LateUpdate — which we disable while in POV. If we are holding the lock without
+            // actively looking around, drop it, whatever else went wrong.
+            if (cursorLocked && !dragging && !fpsMode)
+                SetCursorLock(false);
 
             if (!typingInUi && ToggleKey.Value.IsDown())
             {
@@ -240,6 +284,13 @@ namespace PerspectiveX
             {
                 DisablePov();
                 return;
+            }
+
+            // outfits/accessories swapped mid-POV bring in renderers we've never seen
+            if (HideHead.Value && Time.time >= nextHeadRescan)
+            {
+                nextHeadRescan = Time.time + HeadRescanInterval;
+                HideHeadRenderers();
             }
 
             if (!typingInUi && CyclePrevKey.Value.IsDown())
@@ -335,6 +386,73 @@ namespace PerspectiveX
         {
             return GUIUtility.hotControl != 0 ||
                    (EventSystem.current != null && EventSystem.current.IsPointerOverGameObject());
+        }
+
+        // The panel is an IMGUI window, which uGUI can't see at all (EventSystem's
+        // IsPointerOverGameObject only knows about uGUI), so clicks on it would otherwise also
+        // land on whatever game UI happens to sit underneath. Input.ResetInputAxes() is the
+        // blunt instrument ConfigurationManager uses for the same problem, and it is genuinely
+        // dangerous: it is process-wide (it took out other plugins' hotkeys, including
+        // ConfigurationManager's own F1) and it used to be armed purely by "is the cursor
+        // inside this rectangle". If the game had pinned the OS cursor at a pixel the panel was
+        // later dragged over, that condition became permanently true and swallowed every key
+        // the user could have escaped with. So: never suppress while the cursor is pinned, and
+        // give up entirely if we have been suppressing for seconds with a cursor that has not
+        // moved by a single pixel — the exact signature of that softlock.
+        private void UpdatePanelInputSuppression()
+        {
+            if (!panelVisible || fpsMode || dragging || IsCursorPinned() || !IsMouseOverPanel())
+            {
+                inputSuppressFrames = 0;
+                return;
+            }
+
+            Vector3 mouse = Input.mousePosition;
+            if (inputSuppressFrames == 0 || mouse != lastSuppressMousePos)
+            {
+                lastSuppressMousePos = mouse;
+                inputSuppressFrames = 1;
+            }
+            else if (++inputSuppressFrames > InputSuppressFrameLimit)
+            {
+                return;
+            }
+
+            Input.ResetInputAxes();
+        }
+
+        // GameCursor.isLock is public static and process-global; while it is set the game warps
+        // the physical cursor back to a snapshotted screen pixel every frame via USER32.
+        private static bool IsCursorPinned()
+        {
+            try
+            {
+                return GameCursor.isLock;
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+        }
+
+        // The repair button only lives in the panel, which a user with a damaged scene has no
+        // reason to open, so say it out loud once per session when we notice the damage.
+        private void WarnAboutHiddenHeadsOnce()
+        {
+            if (!isStudio || hiddenHeadNoticeShown)
+                return;
+            hiddenHeadNoticeShown = true;
+            hiddenHeadChars = ScanHiddenHeads(false);
+            if (hiddenHeadChars > 0)
+                Logger.LogMessage(hiddenHeadChars + " character(s) in this scene have their head hidden by the scene file itself - open the PerspectiveX panel (" + PanelKey.Value + ") to bring it back.");
+        }
+
+        private void UpdateHiddenHeadScan()
+        {
+            if (!isStudio || Time.time < nextHiddenHeadScan)
+                return;
+            nextHiddenHeadScan = Time.time + HiddenHeadScanInterval;
+            hiddenHeadChars = ScanHiddenHeads(false);
         }
 
         private void OnCameraPreCull(Camera renderingCam)
@@ -468,6 +586,12 @@ namespace PerspectiveX
                 disabledCameraControl = cam.GetComponent<global::Studio.CameraControl>();
             if (disabledCameraControl)
                 disabledCameraControl.enabled = false;
+            // Unconditionally, and after switching the camera control off: dragging the Studio
+            // camera pins the OS cursor through GameCursor, and Studio.CameraControl.LateUpdate
+            // is the only code that ever releases it again. Entering POV mid-drag disables that
+            // LateUpdate and would strand the physical cursor on one pixel, desktop-wide, with
+            // no way back short of killing the game.
+            SetCursorLock(false);
             FreezeRoamCamera();
 
             dof = cam.GetComponent<DepthOfField>();
@@ -487,7 +611,9 @@ namespace PerspectiveX
             if (fov <= 0f)
                 fov = DefaultFov.Value;
 
-            CaptureAndHideHead();
+            ApplyHeadHiding();
+            nextHeadRescan = Time.time + HeadRescanInterval;
+            WarnAboutHiddenHeadsOnce();
             SuppressFreeRoamViewSwitcher();
 
             InitViewFromHead();
@@ -502,36 +628,164 @@ namespace PerspectiveX
         {
             povEnabled = false;
 
-            RestoreHeadVisibility(chara, origVisibleHeadAlways);
-            chara = null;
-
-            if (cam)
+            // Everything in here restores game state we took over, and any single step can throw
+            // (a character destroyed under us, KKS API drift, ...). The cursor release in the
+            // finally block is the one that absolutely must happen: leaving it out is a
+            // desktop-wide cursor lock the user can only escape by killing the game.
+            try
             {
-                cam.fieldOfView = origFov;
-                cam.nearClipPlane = origNearClip;
-            }
-            if (disabledCameraControl)
-                disabledCameraControl.enabled = true;
-            disabledCameraControl = null;
-            RestoreRoamCamera();
-            RestoreFreeRoamViewSwitcher();
+                RestoreHeadRenderers();
+                chara = null;
 
-            if (dofChanged && dof)
+                if (cam)
+                {
+                    cam.fieldOfView = origFov;
+                    cam.nearClipPlane = origNearClip;
+                }
+                if (disabledCameraControl)
+                    disabledCameraControl.enabled = true;
+                RestoreRoamCamera();
+                RestoreFreeRoamViewSwitcher();
+
+                if (dofChanged && dof)
+                {
+                    dof.focalSize = dofOrigSize;
+                    dof.aperture = dofOrigAperture;
+                    if (dof.focalTransform)
+                        dof.focalTransform.localPosition = dofOrigFocalPos;
+                }
+            }
+            finally
             {
-                dof.focalSize = dofOrigSize;
-                dof.aperture = dofOrigAperture;
-                if (dof.focalTransform)
-                    dof.focalTransform.localPosition = dofOrigFocalPos;
-            }
-            dof = null;
-            dofChanged = false;
-            cam = null;
-
-            if (dragging || fpsMode)
                 SetCursorLock(false);
-            dragging = false;
-            fpsMode = false;
-            camLocked = false;
+                chara = null;
+                disabledCameraControl = null;
+                dof = null;
+                dofChanged = false;
+                cam = null;
+                dragging = false;
+                fpsMode = false;
+                camLocked = false;
+            }
+        }
+
+        // A borrowed slot in one of the game camera's condition delegates, with whatever was in it
+        // before us (Studio itself puts a delegate in noCtrlCondition during StudioScene init).
+        private sealed class CameraCondHook
+        {
+            public FieldInfo Field;
+            public Delegate Prev;
+            public Delegate Ours;
+        }
+
+        // Both game camera controllers ask a pair of public delegates for permission before
+        // reading the mouse: noCtrlCondition/NoCtrlCondition ("true = don't drag") gates the
+        // orbit drag, zoomCondition/ZoomCondition ("true = allowed") gates the scroll zoom.
+        // Without this, left-clicking a button on our IMGUI panel also orbits the Studio camera —
+        // and orbiting pins the OS cursor at that pixel, which is by construction inside the
+        // panel, i.e. a direct route into the cursor softlock. Studio.CameraControl only guards
+        // its own drag with EventSystem.IsPointerOverGameObject(), which is uGUI-only and cannot
+        // see IMGUI windows. Field lookup is reflective (the two controllers differ in casing,
+        // and KKS could drift) — if it isn't there we simply don't get the guard.
+        private void EnsureCameraConditionHooks()
+        {
+            if (hookedCameraControl)
+                return;
+            MonoBehaviour ctrl = null;
+            try
+            {
+                Camera mainCam = Camera.main;
+                if (!mainCam)
+                    return;
+                ctrl = mainCam.GetComponent<CameraControl_Ver2>();
+                if (!ctrl)
+                    ctrl = mainCam.GetComponent<global::Studio.CameraControl>();
+            }
+            catch (Exception)
+            {
+                return;
+            }
+            if (!ctrl)
+                return;
+            hookedCameraControl = ctrl;
+            noCtrlHook = HookCameraCondition(ctrl, "noCtrlCondition", "CameraNoCtrlCondition");
+            zoomHook = HookCameraCondition(ctrl, "zoomCondition", "CameraZoomCondition");
+        }
+
+        private CameraCondHook HookCameraCondition(MonoBehaviour ctrl, string fieldName, string methodName)
+        {
+            try
+            {
+                FieldInfo field = ctrl.GetType().GetField(fieldName,
+                    BindingFlags.Public | BindingFlags.Instance | BindingFlags.IgnoreCase);
+                if (field == null || !typeof(Delegate).IsAssignableFrom(field.FieldType))
+                    return null;
+                MethodInfo method = GetType().GetMethod(methodName, BindingFlags.NonPublic | BindingFlags.Instance);
+                Delegate ours = Delegate.CreateDelegate(field.FieldType, this, method, false);
+                if (ours == null)
+                    return null;
+                var hook = new CameraCondHook { Field = field, Prev = (Delegate)field.GetValue(ctrl), Ours = ours };
+                field.SetValue(ctrl, ours);
+                return hook;
+            }
+            catch (Exception)
+            {
+                return null;
+            }
+        }
+
+        private void UnhookCameraConditions()
+        {
+            if (hookedCameraControl)
+            {
+                RestoreCameraCondition(noCtrlHook);
+                RestoreCameraCondition(zoomHook);
+            }
+            noCtrlHook = null;
+            zoomHook = null;
+            hookedCameraControl = null;
+        }
+
+        private void RestoreCameraCondition(CameraCondHook hook)
+        {
+            if (hook == null)
+                return;
+            try
+            {
+                var current = (Delegate)hook.Field.GetValue(hookedCameraControl);
+                hook.Field.SetValue(hookedCameraControl,
+                    current == hook.Ours ? hook.Prev : Delegate.Remove(current, hook.Ours));
+            }
+            catch (Exception)
+            {
+            }
+        }
+
+        // Chained by hand rather than Delegate.Combine: invoking a multicast delegate returns
+        // only the LAST handler's value, so combining onto Studio's existing noCtrlCondition
+        // would silently discard Studio's own answer.
+        private bool CameraNoCtrlCondition()
+        {
+            return InvokePrevCondition(noCtrlHook, false) || IsMouseOverPanel();
+        }
+
+        private bool CameraZoomCondition()
+        {
+            return InvokePrevCondition(zoomHook, true) && !IsMouseOverPanel();
+        }
+
+        private static bool InvokePrevCondition(CameraCondHook hook, bool fallback)
+        {
+            if (hook == null || hook.Prev == null)
+                return fallback;
+            try
+            {
+                return (bool)hook.Prev.DynamicInvoke(null);
+            }
+            catch (Exception)
+            {
+                return fallback;
+            }
         }
 
         // The main-game free-roam camera isn't a CameraControl_Ver2 (that's H) or Studio.CameraControl
@@ -703,10 +957,10 @@ namespace PerspectiveX
 
         private void SwitchTo(ChaControl next)
         {
-            RestoreHeadVisibility(chara, origVisibleHeadAlways);
+            RestoreHeadRenderers();
 
             chara = next;
-            CaptureAndHideHead();
+            ApplyHeadHiding();
             // when we've taken over free-roam, keep the newly selected body visible too
             // (the built-in view switcher that would normally manage this is suppressed)
             if (freeRoamViewSwitcher)
@@ -715,42 +969,125 @@ namespace PerspectiveX
             camLocked = false;
         }
 
-        private void CaptureAndHideHead()
+        // Head hiding used to go through the game's own chara.fileStatus.visibleHeadAlways flag,
+        // which turned out to be a serious data-corruption bug: visibleHeadAlways is a SERIALIZED
+        // member of ChaFileStatus, and Studio writes it into the scene file
+        // (SceneInfo.Save -> OICharInfo.Save -> ChaFile.SaveCharaFile -> GetStatusBytes). Any scene
+        // saved — or autosaved — while POV was active came back with a permanently invisible head,
+        // with no Studio UI anywhere to undo it. Renderer shadow-casting mode is pure runtime state
+        // instead: nothing in the game reads or writes shadowCastingMode (checked across the whole
+        // decompiled Assembly-CSharp), nothing serializes it, and ShadowsOnly keeps the head's
+        // shadow falling on the body instead of popping it out of the lighting. It also leaves the
+        // GameObjects active, so the head bones keep animating (deactivating them is what makes
+        // KK_StudioPOV's camera drift into the body) and the KK/KKS restore divergence from the old
+        // flag approach — GitHub issue #2 — can't come back either.
+        private void ApplyHeadHiding()
         {
-            origVisibleHeadAlways = chara.fileStatus.visibleHeadAlways;
-            origHeadActive = chara.objHead && chara.objHead.activeSelf;
-            GameObject[] hair = chara.objHair;
-            origHairActive = hair == null ? null : hair.Select(h => h && h.activeSelf).ToArray();
             if (HideHead.Value)
-                chara.fileStatus.visibleHeadAlways = false;
+                HideHeadRenderers();
+            else
+                RestoreHeadRenderers();
         }
 
-        private void RestoreHeadVisibility(ChaControl c, bool visible)
+        private void HideHeadRenderers()
         {
-            if (!c)
+            if (!chara)
                 return;
-            c.fileStatus.visibleHeadAlways = visible;
-            if (!visible)
-                return;
+
+            // drop renderers destroyed since the last pass (outfit/accessory changes) so a long
+            // POV session with lots of wardrobe edits doesn't grow the map forever
+            deadRenderers.Clear();
+            foreach (var kv in hiddenRenderers)
+                if (!kv.Key)
+                    deadRenderers.Add(kv.Key);
+            for (int i = 0; i < deadRenderers.Count; i++)
+                hiddenRenderers.Remove(deadRenderers[i]);
+            deadRenderers.Clear();
+
             try
             {
-                // KK re-applies visibleHeadAlways every frame in LateUpdateForce/UpdateVisible,
-                // but KKS doesn't re-show the head from the flag alone — force one refresh,
-                // then reactivate whatever was active on POV enter and is still left inactive.
-                c.LateUpdateForce();
-                if (origHeadActive && c.objHead && !c.objHead.activeSelf)
-                    c.objHead.SetActive(true);
-                GameObject[] hair = c.objHair;
-                if (hair != null && origHairActive != null)
-                    for (int i = 0; i < hair.Length && i < origHairActive.Length; i++)
-                        if (origHairActive[i] && hair[i] && !hair[i].activeSelf)
-                            hair[i].SetActive(true);
+                // same object set the game's own visibleHeadAlways=false path hides:
+                // head, hair, the extended tongue and head-parented accessories
+                CollectHeadRenderers(chara.objHead);
+                GameObject[] hair = chara.objHair;
+                if (hair != null)
+                    for (int i = 0; i < hair.Length; i++)
+                        CollectHeadRenderers(hair[i]);
+                CollectHeadRenderers(chara.objTongueEx);
+
+                GameObject[] acc = chara.objAccessory;
+                ChaFileAccessory.PartsInfo[] parts = chara.nowCoordinate?.accessory?.parts;
+                if (acc != null && parts != null)
+                    for (int i = 0; i < acc.Length && i < parts.Length; i++)
+                        if (parts[i] != null && parts[i].partsOfHead)
+                            CollectHeadRenderers(acc[i]);
             }
-            catch
+            catch (Exception)
             {
-                // KKS API drift must never break POV exit; the flag restore above already
-                // covers KK.
+                // KKS API drift must never break POV; worst case some of the head stays visible
             }
+        }
+
+        private void CollectHeadRenderers(GameObject root)
+        {
+            if (!root)
+                return;
+            Renderer[] renderers = root.GetComponentsInChildren<Renderer>(true);
+            for (int i = 0; i < renderers.Length; i++)
+            {
+                Renderer r = renderers[i];
+                if (!r || hiddenRenderers.ContainsKey(r))
+                    continue;
+                hiddenRenderers[r] = r.shadowCastingMode;
+                r.shadowCastingMode = ShadowCastingMode.ShadowsOnly;
+            }
+        }
+
+        private void RestoreHeadRenderers()
+        {
+            foreach (var kv in hiddenRenderers)
+            {
+                Renderer r = kv.Key;
+                if (!r)
+                    continue; // renderer was destroyed (outfit change, character unloaded)
+                try
+                {
+                    r.shadowCastingMode = kv.Value;
+                }
+                catch (Exception)
+                {
+                }
+            }
+            hiddenRenderers.Clear();
+        }
+
+        // Repair for scenes already damaged by the old flag-based head hiding (see above): the
+        // scene file itself carries visibleHeadAlways=false, so loading it shows a headless
+        // character forever and uninstalling the mod doesn't help. Studio never sets this flag
+        // itself, so in Studio a false value can only be that damage. Fixing it needs a re-save
+        // of the scene to stick, which is why this is a deliberate button and not automatic.
+        private int ScanHiddenHeads(bool repair)
+        {
+            int count = 0;
+            foreach (ChaControl c in FindObjectsOfType<ChaControl>())
+            {
+                if (!c)
+                    continue;
+                try
+                {
+                    if (c.fileStatus == null || c.fileStatus.visibleHeadAlways)
+                        continue;
+                    count++;
+                    if (!repair)
+                        continue;
+                    c.fileStatus.visibleHeadAlways = true;
+                    c.LateUpdateForce();
+                }
+                catch (Exception)
+                {
+                }
+            }
+            return count;
         }
 
         // rendered by ConfigurationManager inside the settings window (CustomDrawer)
@@ -815,6 +1152,10 @@ namespace PerspectiveX
             if (panelVisible == visible)
                 return;
             panelVisible = visible;
+            if (!visible)
+                presetNameFocused = false;
+            else
+                nextHiddenHeadScan = 0f;
             if (toolbarToggle == null || toolbarToggleValue == null)
                 return;
             try
@@ -842,7 +1183,10 @@ namespace PerspectiveX
         private void OnGUI()
         {
             if (!panelVisible)
+            {
+                presetNameFocused = false;
                 return;
+            }
 
             if (!panelStylesInit)
             {
@@ -907,6 +1251,8 @@ namespace PerspectiveX
             if (firstEmpty >= 0)
             {
                 GUILayout.BeginHorizontal();
+                // named so we can tell OUR text field having focus from any other plugin's
+                GUI.SetNextControlName(PresetNameControl);
                 newPresetName = GUILayout.TextField(newPresetName, 24, GUILayout.ExpandWidth(true));
                 if (GUILayout.Button("Save current", GUILayout.Width(96f)))
                 {
@@ -943,6 +1289,23 @@ namespace PerspectiveX
             }
             if (!povEnabled)
                 GUILayout.Label("Views store the exact look direction and zoom - enter POV (" + ToggleKey.Value + ") to use them.", panelHintStyle);
+
+            if (isStudio && hiddenHeadChars > 0)
+            {
+                GUILayout.Space(8f);
+                GUILayout.Label("Scene repair", panelHeaderStyle);
+                if (GUILayout.Button("Bring back hidden heads (" + hiddenHeadChars + ")"))
+                {
+                    int repaired = ScanHiddenHeads(true);
+                    hiddenHeadChars = 0;
+                    Logger.LogMessage(repaired > 0
+                        ? "Heads restored on " + repaired + " character(s) - save the scene to keep it"
+                        : "No hidden heads found");
+                }
+                GUILayout.Label("Versions up to 1.3.2 could save a hidden head into the scene file if you saved while in POV. This puts it back - save the scene afterwards.", panelHintStyle);
+            }
+
+            presetNameFocused = GUI.GetNameOfFocusedControl() == PresetNameControl;
 
             GUI.DragWindow();
         }
@@ -1106,17 +1469,26 @@ namespace PerspectiveX
             return charaList.FirstOrDefault(IsValidPovTarget);
         }
 
-        private static void SetCursorLock(bool locked)
+        // Always applies, never short-circuits on cursorLocked: the game locks the cursor behind
+        // our back too (Studio.CameraControl does it whenever its camera is dragged), so an
+        // unlock request has to go through even when we don't think we hold the lock.
+        private void SetCursorLock(bool locked)
         {
-            if (Singleton<GameCursor>.IsInstance())
+            cursorLocked = locked;
+            try
             {
-                Singleton<GameCursor>.Instance.SetCursorLock(locked);
+                if (Singleton<GameCursor>.IsInstance())
+                {
+                    Singleton<GameCursor>.Instance.SetCursorLock(locked);
+                    return;
+                }
             }
-            else
+            catch (Exception)
             {
-                Cursor.lockState = locked ? CursorLockMode.Locked : CursorLockMode.None;
-                Cursor.visible = !locked;
+                // fall through to the plain Unity cursor below
             }
+            Cursor.lockState = locked ? CursorLockMode.Locked : CursorLockMode.None;
+            Cursor.visible = !locked;
         }
     }
 }
