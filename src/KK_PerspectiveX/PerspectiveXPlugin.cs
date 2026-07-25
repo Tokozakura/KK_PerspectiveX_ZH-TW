@@ -9,7 +9,6 @@ using UnityEngine;
 using UnityEngine.EventSystems;
 using UnityEngine.SceneManagement;
 using UnityStandardAssets.ImageEffects;
-using ShadowCastingMode = UnityEngine.Rendering.ShadowCastingMode;
 
 namespace PerspectiveX
 {
@@ -19,7 +18,7 @@ namespace PerspectiveX
     {
         public const string GUID = "bucky.kk.perspectivex";
         public const string PluginName = "PerspectiveX";
-        public const string Version = "1.3.3";
+        public const string Version = "1.3.4";
 
         private ConfigEntry<KeyboardShortcut> ToggleKey { get; set; }
         private ConfigEntry<KeyboardShortcut> CyclePrevKey { get; set; }
@@ -106,7 +105,7 @@ namespace PerspectiveX
         private float origFov;
         private float origNearClip;
         // renderers we switched to shadows-only to hide the head, with their previous mode
-        private readonly Dictionary<Renderer, ShadowCastingMode> hiddenRenderers = new Dictionary<Renderer, ShadowCastingMode>();
+        private readonly Dictionary<Renderer, bool> hiddenRenderers = new Dictionary<Renderer, bool>();
         private readonly List<Renderer> deadRenderers = new List<Renderer>();
         private float nextHeadRescan;
         private bool hiddenHeadNoticeShown;
@@ -974,13 +973,19 @@ namespace PerspectiveX
         // member of ChaFileStatus, and Studio writes it into the scene file
         // (SceneInfo.Save -> OICharInfo.Save -> ChaFile.SaveCharaFile -> GetStatusBytes). Any scene
         // saved — or autosaved — while POV was active came back with a permanently invisible head,
-        // with no Studio UI anywhere to undo it. Renderer shadow-casting mode is pure runtime state
-        // instead: nothing in the game reads or writes shadowCastingMode (checked across the whole
-        // decompiled Assembly-CSharp), nothing serializes it, and ShadowsOnly keeps the head's
-        // shadow falling on the body instead of popping it out of the lighting. It also leaves the
+        // with no Studio UI anywhere to undo it. Renderer.enabled is pure runtime state instead:
+        // nothing serializes it, and the only game code that writes it (RayChara/LookHit/
+        // CollisionCamera see-through helpers, Studio's camera/background gizmos) never targets the
+        // head — and a re-enable would be undone by the periodic rescan anyway. It also leaves the
         // GameObjects active, so the head bones keep animating (deactivating them is what makes
         // KK_StudioPOV's camera drift into the body) and the KK/KKS restore divergence from the old
         // flag approach — GitHub issue #2 — can't come back either.
+        //
+        // 1.3.3 used shadowCastingMode = ShadowsOnly here, to keep the head's shadow while hiding
+        // the mesh. That backfired: in POV the head sits ON the camera, so it stays a shadow caster
+        // right at the near plane, and the directional light's camera-fitted shadow cascades then
+        // smear a dark blob across the view that swings around with every mouse move (reported by
+        // Koji on Discord). Disabling the renderer drops it out of the shadow map too.
         private void ApplyHeadHiding()
         {
             if (HideHead.Value)
@@ -1036,10 +1041,13 @@ namespace PerspectiveX
             for (int i = 0; i < renderers.Length; i++)
             {
                 Renderer r = renderers[i];
-                if (!r || hiddenRenderers.ContainsKey(r))
+                if (!r)
                     continue;
-                hiddenRenderers[r] = r.shadowCastingMode;
-                r.shadowCastingMode = ShadowCastingMode.ShadowsOnly;
+                if (!hiddenRenderers.ContainsKey(r))
+                    hiddenRenderers[r] = r.enabled;
+                // re-applied on every rescan, not just on first sight, so anything else that
+                // switches a head renderer back on gets corrected within half a second
+                r.enabled = false;
             }
         }
 
@@ -1052,7 +1060,7 @@ namespace PerspectiveX
                     continue; // renderer was destroyed (outfit change, character unloaded)
                 try
                 {
-                    r.shadowCastingMode = kv.Value;
+                    r.enabled = kv.Value;
                 }
                 catch (Exception)
                 {
